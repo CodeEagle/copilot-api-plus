@@ -2308,7 +2308,7 @@
 
         function renderOverview() {
           const connectionState = getConnectionState();
-          const mode = getMode(state.data);
+          
           const cards = [
             {
               icon: "status",
@@ -2317,14 +2317,6 @@
               helper: text("statusCardHelp"),
               accent: connectionState.pillClass,
               extra: `<span class="pill ${connectionState.pillClass}">${icon("link")}${escapeHtml(state.endpoint)}</span>`,
-            },
-            {
-              icon: "mode",
-              title: text("modeCardTitle"),
-              value: escapeHtml(getModeLabel(mode)),
-              helper: text("modeCardHelp"),
-              accent: "pill-brand",
-              extra: `<span class="pill pill-brand">${icon("chart")}${escapeHtml(text("viewMode"))}</span>`,
             },
             {
               icon: "clock",
@@ -2416,16 +2408,18 @@
             });
           }
 
-          refs.overviewGrid.querySelectorAll("[data-refresh-preset]").forEach((button) => {
-            button.addEventListener("click", () => {
-              state.refreshIntervalPreset = getValidRefreshPreset(
-                button.getAttribute("data-refresh-preset") || DEFAULT_REFRESH_PRESET,
-              );
-              persistPreferences();
-              syncAutoRefresh();
-              renderAll();
-            });
-          });
+          // 使用事件委托处理刷新间隔按钮点击（修复刷新间隔设置不生效问题）
+refs.overviewGrid.addEventListener("click", (event) => {
+const presetButton = event.target.closest("[data-refresh-preset]");
+if (presetButton && refs.overviewGrid.contains(presetButton)) {
+state.refreshIntervalPreset = getValidRefreshPreset(
+presetButton.getAttribute("data-refresh-preset") || DEFAULT_REFRESH_PRESET,
+);
+persistPreferences();
+syncAutoRefresh();
+renderAll();
+}
+});
 
           const customInput = document.getElementById("custom-refresh-seconds");
           if (customInput) {
@@ -2511,7 +2505,7 @@
             return;
           }
 
-          const mode = getMode(state.data);
+          
           const sections = [];
           sections.push(renderCopilotSection(state.data));
           sections.push(renderAdvancedPanel(state.data, mode));
