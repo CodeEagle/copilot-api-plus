@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { Hono } from "hono"
 import { cors } from "hono/cors"
 
@@ -17,7 +19,16 @@ server.use(modelLogger())
 server.use(cors())
 server.use(apiKeyAuthMiddleware)
 
-server.get("/", (c) => c.text("Server running"))
+// Serve embedded web management UI
+server.get("/", (c) => {
+  try {
+    const uiPath = join(process.cwd(), "pages", "index.html")
+    const html = readFileSync(uiPath, "utf8")
+    return c.html(html)
+  } catch {
+    return c.text("Server running")
+  }
+})
 
 // Chat completions
 server.route("/chat/completions", completionRoutes)

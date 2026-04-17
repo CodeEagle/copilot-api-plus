@@ -999,6 +999,10 @@
             <span class="inline-icon h-4 w-4" aria-hidden="true" id="tab-icon-statistics"></span>
             <span id="tab-label-statistics"></span>
           </button>
+          <button type="button" class="main-tab-btn" data-main-tab="tutorial">
+            <span class="inline-icon h-4 w-4" aria-hidden="true" id="tab-icon-tutorial"></span>
+            <span id="tab-label-tutorial"></span>
+          </button>
         </nav>
 
         <!-- ══════ Tab 1: Overview (existing content) ══════ -->
@@ -1042,6 +1046,15 @@
               <div class="flex flex-col gap-2 text-sm text-[var(--muted)] sm:flex-row sm:items-center sm:justify-between">
                 <p id="endpoint-hint"></p>
                 <p class="mono text-xs sm:text-sm" id="endpoint-current"></p>
+              </div>
+              <!-- Account switcher: select which account to view usage for -->
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-center" id="account-switcher-row" style="display:none!important">
+                <label class="text-sm font-medium text-[var(--text)] shrink-0" for="account-switcher-select" id="account-switcher-label"></label>
+                <select id="account-switcher-select" class="input-field text-sm flex-1" style="max-width:320px"></select>
+                <button type="button" id="account-switcher-apply" class="btn btn-secondary btn-sm shrink-0">
+                  <span class="inline-icon h-4 w-4" id="account-switcher-icon"></span>
+                  <span id="account-switcher-apply-text"></span>
+                </button>
               </div>
             </form>
           </section>
@@ -1144,6 +1157,96 @@
               </div>
               <div id="stats-accounts-content"></div>
             </section>
+          </div>
+        </section>
+
+        <!-- ══════ Tab 5: Tutorial / Usage Demo ══════ -->
+        <section id="tab-tutorial" class="main-tab-section space-y-5">
+          <div class="dashboard-card-strong p-6 sm:p-7 space-y-4">
+            <div class="section-title text-xl text-[var(--text)]">
+              <span class="section-icon" id="tutorial-title-icon"></span>
+              <span id="tutorial-main-title"></span>
+            </div>
+            <p class="text-sm text-[var(--muted)] leading-7" id="tutorial-main-desc"></p>
+          </div>
+
+          <!-- Step 1: Add Account -->
+          <div class="dashboard-card p-5 sm:p-6 space-y-3">
+            <div class="section-title text-lg text-[var(--text)]">
+              <span class="inline-flex items-center justify-center w-7 h-7 rounded-full bg-[var(--brand-soft)] text-[var(--brand)] text-sm font-bold shrink-0">1</span>
+              <span id="tutorial-step1-title"></span>
+            </div>
+            <p class="text-sm text-[var(--muted)] leading-6" id="tutorial-step1-desc"></p>
+            <a href="#" id="tutorial-go-accounts" class="btn btn-secondary btn-sm inline-flex">
+              <span class="inline-icon h-4 w-4" id="tutorial-go-accounts-icon"></span>
+              <span id="tutorial-go-accounts-text"></span>
+            </a>
+          </div>
+
+          <!-- Step 2: Configure API client -->
+          <div class="dashboard-card p-5 sm:p-6 space-y-4">
+            <div class="section-title text-lg text-[var(--text)]">
+              <span class="inline-flex items-center justify-center w-7 h-7 rounded-full bg-[var(--brand-soft)] text-[var(--brand)] text-sm font-bold shrink-0">2</span>
+              <span id="tutorial-step2-title"></span>
+            </div>
+            <p class="text-sm text-[var(--muted)] leading-6" id="tutorial-step2-desc"></p>
+            <div class="space-y-3">
+              <div class="rounded-xl bg-[var(--panel-strong)] border border-[var(--line)] p-4 space-y-2">
+                <p class="text-xs font-semibold text-[var(--muted)] uppercase tracking-wider" id="tutorial-openai-label"></p>
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-xs text-[var(--muted)] w-32 shrink-0">Base URL</span>
+                    <code class="mono text-sm bg-[var(--surface)] px-3 py-1 rounded-lg border border-[var(--line)] text-[var(--brand)] select-all" id="tutorial-openai-url"></code>
+                    <button type="button" class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('tutorial-openai-url').textContent)" id="tutorial-copy-openai">
+                      <span class="inline-icon h-4 w-4" id="tutorial-copy-openai-icon"></span>
+                    </button>
+                  </div>
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-xs text-[var(--muted)] w-32 shrink-0">API Key</span>
+                    <code class="mono text-sm bg-[var(--surface)] px-3 py-1 rounded-lg border border-[var(--line)] select-all">any_value</code>
+                  </div>
+                </div>
+              </div>
+              <div class="rounded-xl bg-[var(--panel-strong)] border border-[var(--line)] p-4 space-y-2">
+                <p class="text-xs font-semibold text-[var(--muted)] uppercase tracking-wider" id="tutorial-anthropic-label"></p>
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-xs text-[var(--muted)] w-32 shrink-0">Base URL</span>
+                    <code class="mono text-sm bg-[var(--surface)] px-3 py-1 rounded-lg border border-[var(--line)] text-[var(--brand)] select-all" id="tutorial-anthropic-url"></code>
+                    <button type="button" class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('tutorial-anthropic-url').textContent)" id="tutorial-copy-anthropic">
+                      <span class="inline-icon h-4 w-4" id="tutorial-copy-anthropic-icon"></span>
+                    </button>
+                  </div>
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-xs text-[var(--muted)] w-32 shrink-0">API Key</span>
+                    <code class="mono text-sm bg-[var(--surface)] px-3 py-1 rounded-lg border border-[var(--line)] select-all">any_value</code>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 3: Claude Code env setup -->
+          <div class="dashboard-card p-5 sm:p-6 space-y-3">
+            <div class="section-title text-lg text-[var(--text)]">
+              <span class="inline-flex items-center justify-center w-7 h-7 rounded-full bg-[var(--brand-soft)] text-[var(--brand)] text-sm font-bold shrink-0">3</span>
+              <span id="tutorial-step3-title"></span>
+            </div>
+            <p class="text-sm text-[var(--muted)] leading-6" id="tutorial-step3-desc"></p>
+            <pre class="mono text-xs bg-[var(--panel-strong)] border border-[var(--line)] rounded-xl p-4 overflow-x-auto leading-6 select-all" id="tutorial-claude-code-snippet"></pre>
+          </div>
+
+          <!-- Per-account models note -->
+          <div class="dashboard-card p-5 sm:p-6 space-y-3">
+            <div class="section-title text-lg text-[var(--text)]">
+              <span class="section-icon" id="tutorial-models-icon"></span>
+              <span id="tutorial-models-title"></span>
+            </div>
+            <p class="text-sm text-[var(--muted)] leading-6" id="tutorial-models-desc"></p>
+            <a href="#" id="tutorial-go-models" class="btn btn-secondary btn-sm inline-flex">
+              <span class="inline-icon h-4 w-4" id="tutorial-go-models-icon"></span>
+              <span id="tutorial-go-models-text"></span>
+            </a>
           </div>
         </section>
 
@@ -1311,6 +1414,10 @@
             '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>',
           check:
             '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+          book:
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+          switchUser:
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m16 11 2 2 4-4"/></svg>',
         };
 
         const I18N = {
@@ -1425,6 +1532,7 @@
             tabAccounts: "账号管理",
             tabModels: "模型管理",
             tabStatistics: "运行统计",
+            tabTutorial: "使用教程",
             // ── Account Management ──
             accountsSectionTitle: "账号列表",
             accountsTotal: "账号总数",
@@ -1514,6 +1622,26 @@
             apiError: "API 请求失败",
             apiSuccess: "操作成功",
             loading: "加载中...",
+            // ── Account Switcher ──
+            accountSwitcherLabel: "切换账号视角",
+            accountSwitcherApply: "切换",
+            accountSwitcherAll: "所有账号（汇总）",
+            // ── Tutorial ──
+            tutorialMainTitle: "使用教程与配置示例",
+            tutorialMainDesc: "按照以下步骤，将 GitHub Copilot 订阅接入你的 AI 工具。首先确保 Copilot 个人/企业订阅已激活，然后在「账号管理」里添加 GitHub 账号即可。",
+            tutorialStep1Title: "第一步：添加 GitHub 账号",
+            tutorialStep1Desc: "前往「账号管理」标签，点击「添加账号」，通过 GitHub Device Code 完成授权。授权成功后即可在这里查看可用模型和配额。",
+            tutorialGoAccounts: "前往账号管理",
+            tutorialStep2Title: "第二步：配置 API 客户端",
+            tutorialStep2Desc: "将以下地址填写到支持 OpenAI / Anthropic 协议的任意客户端（如 Claude Code、OpenCode、Cursor 等）：",
+            tutorialOpenaiLabel: "OpenAI 兼容端点",
+            tutorialAnthropicLabel: "Anthropic 兼容端点",
+            tutorialCopyHint: "已复制",
+            tutorialStep3Title: "第三步：一键启动 Claude Code",
+            tutorialStep3Desc: "将下面的命令粘贴到终端执行，即可用 Copilot 运行 Claude Code（需要先从「账号管理」获取可用模型名称）：",
+            tutorialModelsTitle: "多账号模型视图",
+            tutorialModelsDesc: "在「模型管理」标签里，可以查看当前所有账号可用的模型列表，以及每个账号的额度与状态（切换到不同账号后刷新即可看到该账号的模型）。",
+            tutorialGoModels: "前往模型管理",
           },
           en: {
             title: "Copilot API Usage Dashboard",
@@ -1626,7 +1754,7 @@
             tabAccounts: "Accounts",
             tabModels: "Models",
             tabStatistics: "Statistics",
-            // ── Account Management ──
+            tabTutorial: "Tutorial",
             accountsSectionTitle: "Account List",
             accountsTotal: "Total Accounts",
             accountsActive: "Active Accounts",
@@ -1715,6 +1843,26 @@
             apiError: "API request failed",
             apiSuccess: "Operation successful",
             loading: "Loading...",
+            // ── Account Switcher ──
+            accountSwitcherLabel: "View by account",
+            accountSwitcherApply: "Switch",
+            accountSwitcherAll: "All accounts (combined)",
+            // ── Tutorial ──
+            tutorialMainTitle: "Tutorial & Configuration Guide",
+            tutorialMainDesc: "Follow these steps to connect your GitHub Copilot subscription to your AI tools. Make sure your Copilot Individual/Enterprise plan is active, then add a GitHub account in the Accounts tab.",
+            tutorialStep1Title: "Step 1: Add a GitHub Account",
+            tutorialStep1Desc: "Go to the Accounts tab and click \"Add Account\". Complete the GitHub Device Code authorization. Once authorized, your available models and quotas will appear here.",
+            tutorialGoAccounts: "Go to Accounts",
+            tutorialStep2Title: "Step 2: Configure Your API Client",
+            tutorialStep2Desc: "Enter the following URL in any client that supports OpenAI or Anthropic protocol (e.g. Claude Code, OpenCode, Cursor, etc.):",
+            tutorialOpenaiLabel: "OpenAI-compatible Endpoint",
+            tutorialAnthropicLabel: "Anthropic-compatible Endpoint",
+            tutorialCopyHint: "Copied",
+            tutorialStep3Title: "Step 3: Launch Claude Code with Copilot",
+            tutorialStep3Desc: "Paste the command below in your terminal to run Claude Code using your Copilot subscription (get the model name from the Models tab first):",
+            tutorialModelsTitle: "Per-Account Model View",
+            tutorialModelsDesc: "The Models tab shows all models available to the current active account, including each account's quota and status. Switch accounts using the switcher in the connection form, then refresh to see that account's models.",
+            tutorialGoModels: "Go to Models",
           },
         };
 
@@ -2215,8 +2363,8 @@
           refs.endpointCurrent.textContent = text("currentTargetLabel", { endpoint: state.endpoint });
 
           // ── Tab labels and icons ──
-          const tabIconMap = { overview: "chart", accounts: "users", models: "cpu", statistics: "activity" };
-          const tabLabelMap = { overview: "tabOverview", accounts: "tabAccounts", models: "tabModels", statistics: "tabStatistics" };
+          const tabIconMap = { overview: "chart", accounts: "users", models: "cpu", statistics: "activity", tutorial: "book" };
+          const tabLabelMap = { overview: "tabOverview", accounts: "tabAccounts", models: "tabModels", statistics: "tabStatistics", tutorial: "tabTutorial" };
           for (const [key, iconName] of Object.entries(tabIconMap)) {
             const iconEl = document.getElementById(`tab-icon-${key}`);
             const labelEl = document.getElementById(`tab-label-${key}`);
@@ -2304,6 +2452,68 @@
           if (modalDoneText) modalDoneText.textContent = text("modalDeviceCodeDone");
           const modalRetryText = document.getElementById("modal-retry-text");
           if (modalRetryText) modalRetryText.textContent = text("modalDeviceCodeRetry");
+
+          // ── Tutorial tab static texts ──
+          const tTitleIcon = document.getElementById("tutorial-title-icon");
+          if (tTitleIcon) tTitleIcon.innerHTML = ICONS.book;
+          const tMainTitle = document.getElementById("tutorial-main-title");
+          if (tMainTitle) tMainTitle.textContent = text("tutorialMainTitle");
+          const tMainDesc = document.getElementById("tutorial-main-desc");
+          if (tMainDesc) tMainDesc.textContent = text("tutorialMainDesc");
+          const tStep1Title = document.getElementById("tutorial-step1-title");
+          if (tStep1Title) tStep1Title.textContent = text("tutorialStep1Title");
+          const tStep1Desc = document.getElementById("tutorial-step1-desc");
+          if (tStep1Desc) tStep1Desc.textContent = text("tutorialStep1Desc");
+          const tGoAccountsText = document.getElementById("tutorial-go-accounts-text");
+          if (tGoAccountsText) tGoAccountsText.textContent = text("tutorialGoAccounts");
+          const tGoAccountsIcon = document.getElementById("tutorial-go-accounts-icon");
+          if (tGoAccountsIcon) tGoAccountsIcon.innerHTML = ICONS.users;
+          const tGoAccounts = document.getElementById("tutorial-go-accounts");
+          if (tGoAccounts) tGoAccounts.addEventListener("click", (e) => { e.preventDefault(); switchMainTab("accounts"); });
+          const tStep2Title = document.getElementById("tutorial-step2-title");
+          if (tStep2Title) tStep2Title.textContent = text("tutorialStep2Title");
+          const tStep2Desc = document.getElementById("tutorial-step2-desc");
+          if (tStep2Desc) tStep2Desc.textContent = text("tutorialStep2Desc");
+          const tOpenaiLabel = document.getElementById("tutorial-openai-label");
+          if (tOpenaiLabel) tOpenaiLabel.textContent = text("tutorialOpenaiLabel");
+          const tAnthropicLabel = document.getElementById("tutorial-anthropic-label");
+          if (tAnthropicLabel) tAnthropicLabel.textContent = text("tutorialAnthropicLabel");
+          const tOpenaiUrl = document.getElementById("tutorial-openai-url");
+          if (tOpenaiUrl) tOpenaiUrl.textContent = state.endpoint.replace("/usage", "") || "http://localhost:4141";
+          const tAnthropicUrl = document.getElementById("tutorial-anthropic-url");
+          if (tAnthropicUrl) tAnthropicUrl.textContent = (state.endpoint.replace("/usage", "") || "http://localhost:4141") + "/anthropic";
+          const tCopyOpenaiIcon = document.getElementById("tutorial-copy-openai-icon");
+          if (tCopyOpenaiIcon) tCopyOpenaiIcon.innerHTML = ICONS.export;
+          const tCopyAnthropicIcon = document.getElementById("tutorial-copy-anthropic-icon");
+          if (tCopyAnthropicIcon) tCopyAnthropicIcon.innerHTML = ICONS.export;
+          const tStep3Title = document.getElementById("tutorial-step3-title");
+          if (tStep3Title) tStep3Title.textContent = text("tutorialStep3Title");
+          const tStep3Desc = document.getElementById("tutorial-step3-desc");
+          if (tStep3Desc) tStep3Desc.textContent = text("tutorialStep3Desc");
+          const baseUrl = state.endpoint.replace("/usage", "") || "http://localhost:4141";
+          const tClaudeSnippet = document.getElementById("tutorial-claude-code-snippet");
+          if (tClaudeSnippet) tClaudeSnippet.textContent =
+            `ANTHROPIC_BASE_URL="${baseUrl}/anthropic" \\\nANTHROPIC_API_KEY="any_value" \\\nclaude`;
+          const tModelsIcon = document.getElementById("tutorial-models-icon");
+          if (tModelsIcon) tModelsIcon.innerHTML = ICONS.cpu;
+          const tModelsTitle = document.getElementById("tutorial-models-title");
+          if (tModelsTitle) tModelsTitle.textContent = text("tutorialModelsTitle");
+          const tModelsDesc = document.getElementById("tutorial-models-desc");
+          if (tModelsDesc) tModelsDesc.textContent = text("tutorialModelsDesc");
+          const tGoModelsText = document.getElementById("tutorial-go-models-text");
+          if (tGoModelsText) tGoModelsText.textContent = text("tutorialGoModels");
+          const tGoModelsIcon = document.getElementById("tutorial-go-models-icon");
+          if (tGoModelsIcon) tGoModelsIcon.innerHTML = ICONS.cpu;
+          const tGoModels = document.getElementById("tutorial-go-models");
+          if (tGoModels) tGoModels.addEventListener("click", (e) => { e.preventDefault(); switchMainTab("models"); });
+
+          // ── Account switcher ──
+          const switcherIcon = document.getElementById("account-switcher-icon");
+          if (switcherIcon) switcherIcon.innerHTML = ICONS.switchUser;
+          const switcherLabel = document.getElementById("account-switcher-label");
+          if (switcherLabel) switcherLabel.textContent = text("accountSwitcherLabel");
+          const switcherApplyText = document.getElementById("account-switcher-apply-text");
+          if (switcherApplyText) switcherApplyText.textContent = text("accountSwitcherApply");
         }
 
         function renderOverview() {
@@ -3142,6 +3352,39 @@ renderAll();
           }
           listEl.innerHTML = accountsData.map((acct) => renderAccountCard(acct)).join("");
           bindAccountActions();
+          updateAccountSwitcher(accountsData);
+        }
+
+        function updateAccountSwitcher(accounts) {
+          const row = document.getElementById("account-switcher-row");
+          const select = document.getElementById("account-switcher-select");
+          if (!row || !select) return;
+          if (accounts.length === 0) {
+            row.style.display = "none";
+            return;
+          }
+          row.style.removeProperty("display");
+          const currentVal = select.value;
+          select.innerHTML = `<option value="">${escapeHtml(text("accountSwitcherAll"))}</option>` +
+            accounts.map((a) => `<option value="${escapeHtml(a.id || a.label || a.github_user || "")}">${escapeHtml(a.label || a.github_user || a.id || "Account")}</option>`).join("");
+          if (currentVal) select.value = currentVal;
+          const applyBtn = document.getElementById("account-switcher-apply");
+          if (applyBtn) {
+            applyBtn.onclick = () => {
+              const selectedId = select.value;
+              const baseEndpoint = state.endpoint.replace("/usage", "");
+              let newEndpoint;
+              if (selectedId) {
+                newEndpoint = `${baseEndpoint}/usage?account=${encodeURIComponent(selectedId)}`;
+              } else {
+                newEndpoint = `${baseEndpoint}/usage`;
+              }
+              state.endpoint = newEndpoint;
+              const endpointInput = document.getElementById("endpoint-input");
+              if (endpointInput) endpointInput.value = newEndpoint;
+              fetchData();
+            };
+          }
         }
 
         function renderAccountsStats(total, active, premium) {

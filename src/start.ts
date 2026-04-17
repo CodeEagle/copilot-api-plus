@@ -12,16 +12,15 @@ import invariant from "tiny-invariant"
 import { accountManager } from "./lib/account-manager"
 import { applyProxyConfig, getModelMappingConfig } from "./lib/config"
 import { modelRouter } from "./lib/model-router"
-import { ensurePaths } from "./lib/paths"
+import { ensurePaths, PATHS } from "./lib/paths"
 import { initProxyFromEnv } from "./lib/proxy"
 import { generateEnvScript } from "./lib/shell"
 import { state } from "./lib/state"
 import {
   setupCopilotToken,
-  setupGitHubToken,
   stopCopilotTokenRefresh,
 } from "./lib/token"
-import { cacheModels, cacheVSCodeVersion } from "./lib/utils"
+import { cacheModels, cacheVSCodeVersion, rootCause } from "./lib/utils"
 import { server } from "./server"
 
 interface RunServerOptions {
@@ -244,27 +243,57 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   // Standard Copilot mode
   await cacheVSCodeVersion()
 
-  await (options.githubToken ?
-    validateGitHubToken(options.githubToken)
-  : setupGitHubToken())
-
   try {
-    await setupCopilotToken()
-  } catch (error) {
-    // If getting Copilot token fails with 401, the GitHub token might be invalid
-    const { HTTPError } = await import("~/lib/error")
-    if (error instanceof HTTPError && error.response.status === 401) {
-      consola.error(
-        "Failed to get Copilot token - GitHub token may be invalid or Copilot access revoked",
-      )
-      const { clearGithubToken } = await import("~/lib/token")
-      await clearGithubToken()
-      consola.info("Please restart to re-authenticate")
+    if (options.githubToken) {
+      await validateGitHubToken(options.githubToken)
+    } else {
+      // Read stored token non-interactively (avoids blocking device-code flow in containers)
+      const { readFile } = await import("node:fs/promises")
+      const stored = await readFile(PATHS.GITHUB_TOKEN_PATH, "utf8")
+        .then((t) => t.trim())
+        .catch(() => "")
+      if (stored) {
+        await validateGitHubToken(stored)
+      } else {
+        consola.info("No GitHub token configured — skipping authentication.")
+        consola.info("Add accounts via the web management UI to enable API features.")
+      }
     }
-    throw error
+  } catch (error) {
+    // Non-fatal: if no token configured, start in token-less mode
+    // Users can add accounts via the web UI
+    consola.warn(`GitHub authentication skipped: ${rootCause(error)}`)
+    consola.info(
+      "Server starting without GitHub token — add accounts via the web UI.",
+    )
   }
 
-  await cacheModels()
+  if (state.githubToken) {
+    try {
+      await setupCopilotToken()
+    } catch (error) {
+      // If getting Copilot token fails with 401, the GitHub token might be invalid
+      const { HTTPError } = await import("~/lib/error")
+      if (error instanceof HTTPError && error.response.status === 401) {
+        consola.error(
+          "Failed to get Copilot token - GitHub token may be invalid or Copilot access revoked",
+        )
+        const { clearGithubToken } = await import("~/lib/token")
+        await clearGithubToken()
+        consola.info("Please restart to re-authenticate")
+      }
+      throw error
+    }
+
+    await cacheModels()
+  } else {
+    consola.info(
+      "No GitHub token configured — skipping Copilot token setup.",
+    )
+    consola.info(
+      "Add accounts via the web management UI to enable API features.",
+    )
+  }
 
   // Initialize multi-account mode
   await initMultiAccount()

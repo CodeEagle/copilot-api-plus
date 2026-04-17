@@ -2,7 +2,10 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-const APP_DIR = path.join(os.homedir(), ".local", "share", "copilot-api-plus")
+// Allow configuring data directory via env var (e.g., COPILOT_API_DATA_DIR=/lzcapp/var/data for LazyCat)
+const APP_DIR = process.env.COPILOT_API_DATA_DIR
+  ? path.resolve(process.env.COPILOT_API_DATA_DIR)
+  : path.join(os.homedir(), ".local", "share", "copilot-api-plus")
 
 const GITHUB_TOKEN_PATH = path.join(APP_DIR, "github_token")
 
