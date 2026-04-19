@@ -1347,7 +1347,7 @@
 
     <script>
       document.addEventListener("DOMContentLoaded", () => {
-        const DEFAULT_ENDPOINT = "http://localhost:4141/usage";
+        const DEFAULT_ENDPOINT = (() => { try { const o = window.location.origin; if (o && o !== "null") return `${o}/usage`; } catch {} return "http://localhost:4141/usage"; })();
         const DEFAULT_REFRESH_PRESET = "60";
         const MIN_CUSTOM_REFRESH_SECONDS = 5;
 
