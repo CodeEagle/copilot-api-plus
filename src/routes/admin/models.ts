@@ -4,7 +4,7 @@ import { Hono } from "hono"
 import { saveModelMappingConfig } from "~/lib/config"
 import { modelRouter } from "~/lib/model-router"
 import { state } from "~/lib/state"
-import { rootCause } from "~/lib/utils"
+import { cacheModels, rootCause } from "~/lib/utils"
 
 export const modelAdminRoutes = new Hono()
 
@@ -12,8 +12,11 @@ export const modelAdminRoutes = new Hono()
 // GET /available — List all models from Copilot
 // ---------------------------------------------------------------------------
 
-modelAdminRoutes.get("/available", (c) => {
+modelAdminRoutes.get("/available", async (c) => {
   try {
+    if (!state.models?.data?.length) {
+      await cacheModels()
+    }
     const models = state.models?.data ?? []
     return c.json(models)
   } catch (error) {
