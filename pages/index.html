@@ -1525,6 +1525,7 @@
             currentTargetLabel: "当前目标：{endpoint}",
             invalidEndpoint: "请输入有效的接口地址。",
             networkErrorFallback: "无法请求接口，请检查本地服务与地址是否正确。",
+            nonJsonResponse: "当前地址返回的是 {type}，不是 /usage JSON。请确认当前目标以 /usage 结尾，并且没有被登录页或首页重定向。",
             noValue: "--",
             viewMode: "查看模式",
             // ── Tab Navigation ──
@@ -1747,6 +1748,7 @@
             currentTargetLabel: "Current target: {endpoint}",
             invalidEndpoint: "Please enter a valid endpoint URL.",
             networkErrorFallback: "Unable to reach the endpoint. Check the local server and the URL.",
+            nonJsonResponse: "The endpoint returned {type}, not /usage JSON. Make sure the target ends with /usage and was not redirected to a login or home page.",
             noValue: "--",
             viewMode: "View mode",
             // ── Tab Navigation ──
@@ -2316,6 +2318,22 @@
           }, getRefreshIntervalSeconds() * 1000);
         }
 
+        async function readJsonResponse(response) {
+          const contentType = response.headers.get("content-type") || "";
+          const body = await response.text();
+          if (!contentType.toLowerCase().includes("application/json")) {
+            const bodyType = body.trimStart().startsWith("<!DOCTYPE") || body.trimStart().startsWith("<html")
+              ? "HTML"
+              : contentType || "non-JSON response";
+            throw new Error(text("nonJsonResponse", { type: bodyType }));
+          }
+          try {
+            return JSON.parse(body);
+          } catch (error) {
+            throw new Error(error instanceof Error && error.message ? error.message : text("networkErrorFallback"));
+          }
+        }
+
         function setEndpoint(endpoint) {
           state.endpoint = endpoint;
           refs.endpointInput.value = endpoint;
@@ -2358,7 +2376,7 @@
           refs.modeChip.textContent = state.data ? getModeLabel(getMode(state.data)) : text("modeChipLabel");
           refs.connectionChips.innerHTML = [
             `<span class="pill pill-neutral">${icon("link")}${escapeHtml(text("endpointCurrent"))}</span>`,
-            `<span class="pill pill-brand">${icon("terminal")}${escapeHtml("/usage")}</span>`,
+            `<a class="pill pill-brand" href="#content-area">${icon("terminal")}${escapeHtml("/usage")}</a>`,
           ].join("");
           refs.endpointCurrent.textContent = text("currentTargetLabel", { endpoint: state.endpoint });
 
@@ -2618,18 +2636,17 @@
             });
           }
 
-          // 使用事件委托处理刷新间隔按钮点击（修复刷新间隔设置不生效问题）
-refs.overviewGrid.addEventListener("click", (event) => {
-const presetButton = event.target.closest("[data-refresh-preset]");
-if (presetButton && refs.overviewGrid.contains(presetButton)) {
-state.refreshIntervalPreset = getValidRefreshPreset(
-presetButton.getAttribute("data-refresh-preset") || DEFAULT_REFRESH_PRESET,
-);
-persistPreferences();
-syncAutoRefresh();
-renderAll();
-}
-});
+          document.querySelectorAll("[data-refresh-preset]").forEach((presetButton) => {
+            presetButton.addEventListener("click", () => {
+              state.refreshIntervalPreset = getValidRefreshPreset(
+                presetButton.getAttribute("data-refresh-preset") || DEFAULT_REFRESH_PRESET,
+              );
+              persistPreferences();
+              syncAutoRefresh();
+              renderOverview();
+              renderStatusBanner();
+            });
+          });
 
           const customInput = document.getElementById("custom-refresh-seconds");
           if (customInput) {
@@ -2637,7 +2654,8 @@ renderAll();
               state.customRefreshSeconds = clampCustomRefreshSeconds(customInput.value);
               persistPreferences();
               syncAutoRefresh();
-              renderAll();
+              renderOverview();
+              renderStatusBanner();
             };
             customInput.addEventListener("change", commitCustomRefresh);
             customInput.addEventListener("blur", commitCustomRefresh);
@@ -2989,7 +3007,7 @@ renderAll();
             if (!response.ok) {
               throw new Error(`HTTP ${response.status} ${response.statusText}`);
             }
-            const data = await response.json();
+            const data = await readJsonResponse(response);
             if (requestId !== latestRequestId) {
               return;
             }
