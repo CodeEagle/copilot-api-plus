@@ -10,9 +10,25 @@ import {
   standardHeaders,
 } from "~/lib/api-config"
 import { rootCause } from "~/lib/utils"
-import { getDeviceCode } from "~/services/github/get-device-code"
+import {
+  getDeviceCode,
+  type DeviceCodeResponse,
+} from "~/services/github/get-device-code"
 
 export const accountRoutes = new Hono()
+
+// ---------------------------------------------------------------------------
+// Device code cache — prevent frontend retries from generating new codes
+// while the user is still authorizing the previous one on GitHub.
+// ---------------------------------------------------------------------------
+let cachedDeviceCode: DeviceCodeResponse | undefined
+let cachedDeviceCodeExpiresAt = 0
+
+// Rate-limit guard — refuse to hit GitHub before the required interval elapses.
+// When GitHub returns "slow_down", it tells us how long to wait.  The frontend
+// ignores this and keeps polling every ~4 s, which locks us into permanent
+// slow_down.  The server enforces the interval instead.
+let pollNotBefore = 0
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -61,6 +77,7 @@ accountRoutes.post("/", async (c) => {
       githubToken: string
       label: string
       accountType?: string
+      proxy?: string
     }>()
 
     if (!body.githubToken || !body.label) {
@@ -72,6 +89,25 @@ accountRoutes.post("/", async (c) => {
       body.label,
       body.accountType,
     )
+
+    // Set optional per-account proxy for IP isolation
+    if (body.proxy) {
+      try {
+        const proxyUrl = new URL(body.proxy)
+        if (!["http:", "https:", "socks5:"].includes(proxyUrl.protocol)) {
+          return c.json(
+            {
+              error: "proxy must use http://, https://, or socks5:// protocol",
+            },
+            400,
+          )
+        }
+      } catch {
+        return c.json({ error: "proxy must be a valid URL" }, 400)
+      }
+      account.proxy = body.proxy
+      await accountManager.saveAccounts()
+    }
 
     return c.json({ account: sanitiseAccount(account) }, 201)
   } catch (error) {
@@ -140,6 +176,48 @@ accountRoutes.put("/:id/status", async (c) => {
 })
 
 // ---------------------------------------------------------------------------
+// PUT /:id/proxy — Update account proxy
+// ---------------------------------------------------------------------------
+
+accountRoutes.put("/:id/proxy", async (c) => {
+  try {
+    const id = c.req.param("id")
+    const body = await c.req.json<{ proxy: string | null }>()
+
+    const account = accountManager.getAccountById(id)
+    if (!account) {
+      return c.json({ error: "Account not found" }, 404)
+    }
+
+    if (body.proxy) {
+      try {
+        const proxyUrl = new URL(body.proxy)
+        if (!["http:", "https:", "socks5:"].includes(proxyUrl.protocol)) {
+          return c.json(
+            {
+              error: "proxy must use http://, https://, or socks5:// protocol",
+            },
+            400,
+          )
+        }
+      } catch {
+        return c.json({ error: "proxy must be a valid URL" }, 400)
+      }
+      account.proxy = body.proxy
+    } else {
+      account.proxy = undefined
+    }
+
+    await accountManager.saveAccounts()
+    return c.json({ account: sanitiseAccount(account) })
+  } catch (error) {
+    consola.warn(`Error updating account proxy: ${rootCause(error)}`)
+    consola.debug("Error updating account proxy:", error)
+    return c.json({ error: "Failed to update account proxy" }, 500)
+  }
+})
+
+// ---------------------------------------------------------------------------
 // POST /:id/refresh — Force refresh token + usage for one account
 // ---------------------------------------------------------------------------
 
@@ -169,7 +247,22 @@ accountRoutes.post("/:id/refresh", async (c) => {
 
 accountRoutes.post("/auth/start", async (c) => {
   try {
+    // Reuse cached device code if it hasn't expired yet.
+    // This prevents frontend retries from generating a new code while the
+    // user is still authorizing the previous one on GitHub.
+    if (cachedDeviceCode && Date.now() < cachedDeviceCodeExpiresAt) {
+      consola.debug("Reusing cached device code (not yet expired)")
+      return c.json(cachedDeviceCode)
+    }
+
     const deviceCode = await getDeviceCode()
+    // eslint-disable-next-line require-atomic-updates
+    cachedDeviceCode = deviceCode
+    // eslint-disable-next-line require-atomic-updates
+    cachedDeviceCodeExpiresAt = Date.now() + deviceCode.expires_in * 1000
+    // Reset rate-limit for the new flow
+
+    pollNotBefore = 0
     return c.json(deviceCode)
   } catch (error) {
     consola.warn(`Error starting device code flow: ${rootCause(error)}`)
@@ -182,6 +275,55 @@ accountRoutes.post("/auth/start", async (c) => {
 // POST /auth/poll — Poll for Device Code authorization completion
 // ---------------------------------------------------------------------------
 
+/** Reset all auth flow state (device code cache + rate limit). */
+function clearAuthFlowState(): void {
+  cachedDeviceCode = undefined
+  cachedDeviceCodeExpiresAt = 0
+  pollNotBefore = 0
+}
+
+/** Handle GitHub error responses during device code polling. */
+function handlePollError(json: Record<string, unknown>):
+  | {
+      status: string
+      interval?: number
+      message?: string
+    }
+  | undefined {
+  if (!("error" in json)) return undefined
+
+  switch (json.error) {
+    case "authorization_pending": {
+      pollNotBefore = Date.now() + 5_000
+      return { status: "pending" }
+    }
+    case "slow_down": {
+      const interval = typeof json.interval === "number" ? json.interval : 10
+      pollNotBefore = Date.now() + interval * 1000
+      consola.info(
+        `Device code poll: GitHub says slow down, waiting ${interval}s`,
+      )
+      return { status: "pending", interval }
+    }
+    case "expired_token": {
+      clearAuthFlowState()
+      return { status: "expired" }
+    }
+    case "access_denied": {
+      clearAuthFlowState()
+      return { status: "denied" }
+    }
+    default: {
+      return {
+        status: "error",
+        message:
+          (json.error_description as string | undefined)
+          || (json.error as string),
+      }
+    }
+  }
+}
+
 accountRoutes.post("/auth/poll", async (c) => {
   try {
     const { device_code, label, account_type } = await c.req.json<{
@@ -192,6 +334,16 @@ accountRoutes.post("/auth/poll", async (c) => {
 
     if (!device_code) {
       return c.json({ error: "device_code is required" }, 400)
+    }
+
+    // Server-side rate-limit: if GitHub told us to slow down, don't hit
+    // their endpoint again until the required interval has elapsed.
+    // Return the cached result so the frontend sees "pending".
+    const now = Date.now()
+    if (now < pollNotBefore) {
+      const waitSec = Math.ceil((pollNotBefore - now) / 1000)
+      consola.debug(`Device code poll: throttled, ${waitSec}s remaining`)
+      return c.json({ status: "pending", interval: waitSec })
     }
 
     // Single poll attempt to GitHub's token endpoint
@@ -209,42 +361,37 @@ accountRoutes.post("/auth/poll", async (c) => {
     )
 
     if (!response.ok) {
+      const errorText = await response.text().catch(() => "")
+      consola.warn(
+        `Device code poll: GitHub returned ${response.status}: ${errorText}`,
+      )
       return c.json({ status: "pending" })
     }
 
-    const json = (await response.json()) as
-      | { access_token: string; token_type: string; scope: string }
-      | { error: string; error_description?: string }
+    const rawText = await response.text()
+    consola.debug(`Device code poll raw response: ${rawText}`)
+
+    let json: Record<string, unknown>
+    try {
+      json = JSON.parse(rawText) as Record<string, unknown>
+    } catch {
+      consola.warn(`Device code poll: GitHub returned non-JSON: ${rawText}`)
+      return c.json({ status: "pending" })
+    }
 
     // Handle error responses from GitHub
-    if ("error" in json) {
-      switch (json.error) {
-        case "authorization_pending": {
-          return c.json({ status: "pending" })
-        }
-        case "slow_down": {
-          return c.json({ status: "pending", interval: 10 })
-        }
-        case "expired_token": {
-          return c.json({ status: "expired" })
-        }
-        case "access_denied": {
-          return c.json({ status: "denied" })
-        }
-        default: {
-          return c.json({
-            status: "error",
-            message: json.error_description || json.error,
-          })
-        }
-      }
+    const errorResult = handlePollError(json)
+    if (errorResult) {
+      return c.json(errorResult)
     }
 
     // Success — we have an access token
-    if ("access_token" in json && json.access_token) {
+    if ("access_token" in json && (json.access_token as string)) {
+      clearAuthFlowState()
+
       const accountLabel = label || `Account ${accountManager.accountCount + 1}`
       const account = await accountManager.addAccount(
-        json.access_token,
+        json.access_token as string,
         accountLabel,
         account_type || "individual",
       )

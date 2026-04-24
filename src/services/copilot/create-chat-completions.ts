@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
@@ -9,6 +10,14 @@ import {
 } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 import { modelRouter } from "~/lib/model-router"
+import {
+  getAccountDispatcher,
+  notifyStreamEnd,
+  notifyStreamStart,
+  resetAccountConnections,
+  resetConnections,
+  type StreamAccountInfo,
+} from "~/lib/proxy"
 import { state } from "~/lib/state"
 import { refreshCopilotToken } from "~/lib/token"
 import { findModel, rootCause } from "~/lib/utils"
@@ -19,17 +28,24 @@ import { findModel, rootCause } from "~/lib/utils"
 
 /**
  * Timeout for the initial HTTP connection + headers (not the body/stream).
- * Copilot's slow models (e.g. claude-opus) can take up to ~60s to start
- * streaming, so we give 120s for the connection phase.
+ * Copilot's slow models (e.g. claude-opus with thinking) can take up to
+ * ~120s to start streaming, so we give a generous timeout for headers.
  */
 const FETCH_TIMEOUT_MS = 120_000
 
-/**
- * Retry delays in ms (exponential back-off).
- * After a network error we wait longer before each retry to let the
- * Copilot backend recover and avoid triggering connection-level throttling.
- */
-const RETRY_DELAYS = [2_000, 5_000, 10_000]
+// ---------------------------------------------------------------------------
+// Anti-correlation: jitter & frequency limiting
+// ---------------------------------------------------------------------------
+
+/** Minimum interval (ms) between requests on the same account. */
+const MIN_SAME_ACCOUNT_INTERVAL_MS = 1_000
+
+/** Random jitter range (ms) added when switching between accounts. */
+const ACCOUNT_SWITCH_JITTER_MIN_MS = 1_000
+const ACCOUNT_SWITCH_JITTER_MAX_MS = 5_000
+
+/** Track the last-used account ID to detect account switches. */
+let lastUsedAccountId: string | undefined
 
 /**
  * Wrapper around `fetch()` that aborts if the server doesn't respond within
@@ -40,16 +56,29 @@ const RETRY_DELAYS = [2_000, 5_000, 10_000]
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
-  timeoutMs: number = FETCH_TIMEOUT_MS,
+  {
+    timeoutMs = FETCH_TIMEOUT_MS,
+    accountId,
+    accountProxy,
+  }: {
+    timeoutMs?: number
+    accountId?: string
+    accountProxy?: string
+  } = {},
 ): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
-    const response = await fetch(url, {
+    // Use per-account connection pool when in multi-account mode
+    const fetchOptions: RequestInit & { dispatcher?: unknown } = {
       ...init,
       signal: controller.signal,
-    })
+    }
+    if (accountId) {
+      fetchOptions.dispatcher = getAccountDispatcher(accountId, accountProxy)
+    }
+    const response = await fetch(url, fetchOptions)
     return response
   } catch (error: unknown) {
     if (error instanceof DOMException && error.name === "AbortError") {
@@ -62,37 +91,46 @@ async function fetchWithTimeout(
 }
 
 /**
- * Retry loop for fetch: retries on network errors with exponential back-off.
+ * Single-attempt fetch with connection pool reset on network errors.
  *
- * Returns `{ response }` on success.
- * Throws the last network error if all retries are exhausted.
+ * Retries are intentionally disabled — each Copilot request consumes a
+ * credit, and the caller (e.g. Claude Code) already retries at the
+ * application level.  Our retry + caller retry created a request cascade
+ * that caused account bans (367 requests in 52 minutes).
+ *
+ * On network failure (NOT timeout), the pooled connections are destroyed
+ * so that the caller's next attempt gets a fresh socket instantly.
  */
 async function fetchWithRetry(
   url: string,
   buildInit: () => RequestInit,
+  {
+    accountId,
+    accountProxy,
+  }: { accountId?: string; accountProxy?: string } = {},
 ): Promise<Response> {
-  let lastError: unknown
-  const maxAttempts = RETRY_DELAYS.length + 1 // 1 initial + retries
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      return await fetchWithTimeout(url, buildInit())
-    } catch (error: unknown) {
-      lastError = error
-      if (attempt < maxAttempts - 1) {
-        const delay = RETRY_DELAYS[attempt]
-        consola.warn(
-          `Network error on attempt ${attempt + 1}/${maxAttempts}, retrying in ${delay}ms:`,
-          error instanceof Error ? error.message : error,
-        )
-        await new Promise((r) => setTimeout(r, delay))
+  try {
+    return await fetchWithTimeout(url, buildInit(), {
+      timeoutMs: FETCH_TIMEOUT_MS,
+      accountId,
+      accountProxy,
+    })
+  } catch (error: unknown) {
+    // Timeout errors mean the request likely reached Copilot (credit
+    // already consumed) or the upstream is genuinely slow — don't reset
+    // the pool, just propagate.
+    const msg = error instanceof Error ? error.message : String(error)
+    if (!msg.includes("timed out")) {
+      // Network error: destroy pooled connections so the caller's next
+      // attempt uses fresh sockets instead of stale ones.
+      if (accountId) {
+        resetAccountConnections(accountId)
+      } else {
+        resetConnections()
       }
     }
+    throw error
   }
-
-  throw lastError instanceof Error ? lastError : (
-      new Error("Network request failed")
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -102,15 +140,33 @@ async function fetchWithRetry(
 /**
  * Wraps an AsyncGenerator so that `releaseSlot` is called when the generator
  * finishes (return or throw), not when the outer function returns.
+ * Also tracks active streams for the proxy-tunnel keepalive mechanism.
  */
 async function* wrapGeneratorWithRelease(
   gen: AsyncGenerator,
   releaseSlot: () => void,
+  accountInfo?: StreamAccountInfo,
 ): AsyncGenerator {
+  notifyStreamStart(accountInfo)
+  let streamError = false
   try {
     yield* gen
+  } catch (error) {
+    streamError = true
+    throw error
   } finally {
+    notifyStreamEnd(accountInfo)
     releaseSlot()
+    // After a stream error, destroy all pooled connections so the next
+    // request from the client gets a fresh socket instantly instead of
+    // waiting ~60s on a stale one.
+    if (streamError) {
+      if (accountInfo?.accountId) {
+        resetAccountConnections(accountInfo.accountId)
+      } else {
+        resetConnections()
+      }
+    }
   }
 }
 
@@ -125,6 +181,14 @@ async function* wrapGeneratorWithRelease(
  * requests to that model skip the injection automatically.
  */
 const reasoningUnsupportedModels = new Set<string>()
+
+/**
+ * Models whose reasoning_effort must be capped at a lower level.
+ * e.g. claude-opus-4.7 rejects "high" but accepts "medium".
+ * When a model returns 400 with "is not supported by model", it is added
+ * here with its maximum supported effort level.
+ */
+const reasoningEffortCap = new Map<string, "low" | "medium">()
 
 /**
  * Compute an appropriate thinking_budget from model capabilities.
@@ -144,12 +208,28 @@ function getThinkingBudget(
 }
 
 /**
+ * Check whether tool_choice forces tool use (not "auto" or "none").
+ * Thinking/reasoning cannot be enabled when tool_choice forces a tool.
+ */
+function isToolChoiceForced(
+  toolChoice: ChatCompletionsPayload["tool_choice"],
+): boolean {
+  if (!toolChoice) return false
+  if (toolChoice === "auto" || toolChoice === "none") return false
+  // "required" or { type: "function", ... } are forced
+  return true
+}
+
+/**
  * Inject thinking parameters into the payload based on model capabilities.
  *
  * Strategy (in priority order):
  *   1. If the client already set reasoning_effort or thinking_budget → keep as-is
- *   2. If model capabilities declare max_thinking_budget → inject thinking_budget
- *   3. Otherwise → inject reasoning_effort="high" (works on claude-*-4.6)
+ *   2. If tool_choice forces tool use → skip (API rejects the combination)
+ *   3. If model capabilities declare max_thinking_budget → inject thinking_budget
+ *   4. Otherwise → inject reasoning_effort at the highest level the model supports:
+ *      - "high" by default (maximum thinking for most models)
+ *      - Capped to "medium"/"low" if the model previously rejected "high"
  *
  * The fallback to reasoning_effort ensures thinking works even when the
  * /models endpoint doesn't expose thinking budget fields.
@@ -158,8 +238,33 @@ function injectThinking(
   payload: ChatCompletionsPayload,
   resolvedModel: string,
 ): ChatCompletionsPayload {
-  // Client already specified thinking params — respect them
+  // Thinking cannot be enabled when tool_choice forces tool use.
+  // This check must come FIRST — even if the client explicitly set
+  // reasoning_effort / thinking_budget, the API will reject the combination.
+  if (isToolChoiceForced(payload.tool_choice)) {
+    if (payload.reasoning_effort || payload.thinking_budget) {
+      const stripped = { ...payload }
+      delete stripped.reasoning_effort
+      delete stripped.thinking_budget
+      consola.debug(
+        `Thinking: stripped reasoning params for "${resolvedModel}" because tool_choice forces tool use`,
+      )
+      return stripped
+    }
+    return payload
+  }
+
+  // Client already specified thinking params — respect them, but still
+  // apply the runtime-learned cap if the model rejected "high" previously.
   if (payload.reasoning_effort || payload.thinking_budget) {
+    if (
+      payload.reasoning_effort
+      && payload.reasoning_effort !== "medium"
+      && payload.reasoning_effort !== "low"
+    ) {
+      const cap = reasoningEffortCap.get(resolvedModel)
+      if (cap) return { ...payload, reasoning_effort: cap }
+    }
     return payload
   }
 
@@ -170,12 +275,16 @@ function injectThinking(
     return { ...payload, thinking_budget: budget }
   }
 
-  // Fallback: inject reasoning_effort="high" (auto-detected at runtime)
-  if (!reasoningUnsupportedModels.has(resolvedModel)) {
-    return { ...payload, reasoning_effort: "high" as const }
+  // Fallback: inject reasoning_effort at the highest supported level.
+  // Default is "high"; auto-downgraded at runtime if a model rejects it.
+  if (reasoningUnsupportedModels.has(resolvedModel)) {
+    return payload
   }
-
-  return payload
+  const effort = reasoningEffortCap.get(resolvedModel) ?? "high"
+  return {
+    ...payload,
+    reasoning_effort: effort as ChatCompletionsPayload["reasoning_effort"],
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +298,7 @@ function logThinkingInjection(
 ) {
   if (original.reasoning_effort || original.thinking_budget) {
     consola.debug(
-      `Thinking: client-specified (reasoning_effort=${original.reasoning_effort ?? "none"} / thinking_budget=${original.thinking_budget ?? "none"})`,
+      `Thinking: translated (reasoning_effort=${original.reasoning_effort ?? "none"} / thinking_budget=${original.thinking_budget ?? "none"})`,
     )
   } else if (
     injected.thinking_budget
@@ -198,9 +307,12 @@ function logThinkingInjection(
     consola.debug(
       `Thinking: injected thinking_budget=${injected.thinking_budget} for "${resolvedModel}"`,
     )
-  } else if (injected.reasoning_effort === "high") {
+  } else if (
+    injected.reasoning_effort
+    && injected.reasoning_effort !== original.reasoning_effort
+  ) {
     consola.debug(
-      `Thinking: injected reasoning_effort=high for "${resolvedModel}"`,
+      `Thinking: injected reasoning_effort=${injected.reasoning_effort} for "${resolvedModel}"`,
     )
   } else if (reasoningUnsupportedModels.has(resolvedModel)) {
     consola.debug(
@@ -245,28 +357,31 @@ export const createChatCompletions = async (
     // For streaming responses, wrap the generator so the slot is released
     // when the stream ends (not when this function returns).
     if (Symbol.asyncIterator in result) {
-      return wrapGeneratorWithRelease(result, releaseSlot)
+      const accountInfo = (
+        result as AsyncGenerator & {
+          __accountInfo?: StreamAccountInfo
+        }
+      ).__accountInfo
+      const wrapped = wrapGeneratorWithRelease(result, releaseSlot, accountInfo)
+      // Propagate accountInfo so handler.ts can determine proxy status
+      ;(
+        wrapped as AsyncGenerator & {
+          __accountInfo?: StreamAccountInfo
+        }
+      ).__accountInfo = accountInfo
+      return wrapped
     }
 
     // Non-streaming: release immediately
     releaseSlot()
     return result
   } catch (error) {
-    // Auto-detect models that don't support reasoning_effort:
-    // On 400 "Unrecognized request argument", strip the parameter and retry.
-    const isReasoningRejected =
-      wasInjected
-      && error instanceof HTTPError
-      && error.response.status === 400
-      && error.message.includes("Unrecognized request argument")
-
-    if (isReasoningRejected) {
-      reasoningUnsupportedModels.add(resolvedModel)
-      consola.info(
-        `Model "${resolvedModel}" does not support reasoning_effort — disabled for future requests`,
-      )
-      return retryWithoutReasoning(routedPayload, releaseSlot)
-    }
+    const retryResult = handle400ReasoningError(
+      error,
+      { resolvedModel, thinkingPayload, routedPayload, wasInjected },
+      releaseSlot,
+    )
+    if (retryResult !== undefined) return retryResult
 
     releaseSlot()
     throw error
@@ -274,17 +389,88 @@ export const createChatCompletions = async (
 }
 
 /**
- * Retry a request without reasoning_effort after the model rejected it.
+ * Handle 400 reasoning_effort errors in the outer createChatCompletions catch.
+ * Returns a Promise (retry result) if handled, or undefined to re-throw.
+ */
+function handle400ReasoningError(
+  error: unknown,
+  ctx: {
+    resolvedModel: string
+    thinkingPayload: ChatCompletionsPayload
+    routedPayload: ChatCompletionsPayload
+    wasInjected: boolean
+  },
+  releaseSlot: () => void,
+): Promise<AsyncGenerator | ChatCompletionResponse> | undefined {
+  if (!(error instanceof HTTPError) || error.response.status !== 400)
+    return undefined
+  const errMsg = error.message
+
+  // Case 2: Model rejects the specific value (e.g. "high" not supported, only "medium")
+  if (
+    errMsg.includes("supported values")
+    || (errMsg.includes("is not supported by model")
+      && errMsg.includes("reasoning_effort"))
+  ) {
+    const currentEffort = ctx.thinkingPayload.reasoning_effort
+    if (
+      currentEffort
+      && currentEffort !== "medium"
+      && currentEffort !== "low"
+    ) {
+      reasoningEffortCap.set(ctx.resolvedModel, "medium")
+      consola.debug(
+        `Model "${ctx.resolvedModel}" rejected reasoning_effort="${currentEffort}" — downgrading to "medium"`,
+      )
+      return retryWithModifiedPayload(
+        { ...ctx.routedPayload, reasoning_effort: "medium" as const },
+        releaseSlot,
+      )
+    }
+  }
+
+  // Case 1: Model doesn't support reasoning_effort at all
+  if (
+    ctx.wasInjected
+    && (errMsg.includes("Unrecognized request argument")
+      || errMsg.includes("does not support reasoning")
+      || errMsg.includes("invalid_reasoning_effort"))
+  ) {
+    reasoningUnsupportedModels.add(ctx.resolvedModel)
+    consola.debug(
+      `Model "${ctx.resolvedModel}" does not support reasoning_effort — disabled for future requests`,
+    )
+    return retryWithModifiedPayload(ctx.routedPayload, releaseSlot)
+  }
+
+  return undefined
+}
+
+/**
+ * Retry a request after modifying the payload (e.g. stripping or
+ * downgrading reasoning_effort).
  * Handles slot release for both streaming and non-streaming responses.
  */
-async function retryWithoutReasoning(
+async function retryWithModifiedPayload(
   payload: ChatCompletionsPayload,
   releaseSlot: () => void,
 ) {
   try {
     const result = await dispatchRequest(payload)
     if (Symbol.asyncIterator in result) {
-      return wrapGeneratorWithRelease(result, releaseSlot)
+      const accountInfo = (
+        result as AsyncGenerator & {
+          __accountInfo?: StreamAccountInfo
+        }
+      ).__accountInfo
+      const wrapped = wrapGeneratorWithRelease(result, releaseSlot, accountInfo)
+      // Propagate accountInfo so handler.ts can determine proxy status
+      ;(
+        wrapped as AsyncGenerator & {
+          __accountInfo?: StreamAccountInfo
+        }
+      ).__accountInfo = accountInfo
+      return wrapped
     }
     releaseSlot()
     return result
@@ -311,9 +497,9 @@ async function createWithSingleAccount(payload: ChatCompletionsPayload) {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
   const enableVision = payload.messages.some(
-    (x) =>
-      typeof x.content !== "string"
-      && x.content?.some((x) => x.type === "image_url"),
+    (msg) =>
+      typeof msg.content !== "string"
+      && msg.content?.some((part) => part.type === "image_url"),
   )
 
   // Agent/user check for X-Initiator header
@@ -371,7 +557,18 @@ async function createWithSingleAccount(payload: ChatCompletionsPayload) {
     const errorBody = await response.text()
 
     if (response.status === 400) {
-      consola.warn(`400: ${errorBody}`)
+      // reasoning_effort / thinking 相关的 400 是预期内的(会被自动降级重试),
+      // 静默到 debug 避免误导用户。其他 400 保留 warn。
+      const isExpectedReasoningError =
+        errorBody.includes("reasoning_effort")
+        || errorBody.includes("invalid_reasoning_effort")
+        || errorBody.includes("does not support reasoning")
+      const isModelNotSupported = errorBody.includes("model_not_supported")
+      if (isExpectedReasoningError || isModelNotSupported) {
+        consola.debug(`400 (auto-handled): ${errorBody}`)
+      } else {
+        consola.warn(`400: ${errorBody}`)
+      }
     } else {
       consola.error("Failed to create chat completions", {
         status: response.status,
@@ -387,7 +584,11 @@ async function createWithSingleAccount(payload: ChatCompletionsPayload) {
   }
 
   if (payload.stream) {
-    return events(response)
+    const gen = events(response) as AsyncGenerator & {
+      __accountInfo?: StreamAccountInfo
+    }
+    gen.__accountInfo = { apiBaseUrl: copilotBaseUrl(state) }
+    return gen
   }
 
   return (await response.json()) as ChatCompletionResponse
@@ -410,7 +611,7 @@ async function tryRefreshAndRetry(
     await accountManager.refreshAccountToken(account)
     // Update tokenSource with the refreshed token
     tokenSource.copilotToken = account.copilotToken
-    const result = await doFetch(payload, tokenSource)
+    const result = await doFetch(payload, tokenSource, account.id)
     accountManager.markAccountSuccess(account.id)
     return result
   } catch {
@@ -421,6 +622,52 @@ async function tryRefreshAndRetry(
     )
     return null
   }
+}
+
+/** Try to retry a 400 with downgraded reasoning_effort on the same account. */
+async function tryDowngradeReasoningEffort(
+  errMsg: string,
+  retryContext: { payload: ChatCompletionsPayload; tokenSource: TokenSource },
+  accountId: string,
+): Promise<AsyncGenerator | ChatCompletionResponse | null> {
+  const isEffortRejection =
+    errMsg.includes("supported values")
+    || (errMsg.includes("is not supported by model")
+      && errMsg.includes("reasoning_effort"))
+  if (!isEffortRejection) return null
+
+  const currentEffort = retryContext.payload.reasoning_effort
+  if (!currentEffort || currentEffort === "medium" || currentEffort === "low")
+    return null
+
+  reasoningEffortCap.set(retryContext.payload.model, "medium")
+  const downgraded = {
+    ...retryContext.payload,
+    reasoning_effort: "medium" as const,
+  }
+  try {
+    return await doFetch(downgraded, retryContext.tokenSource, accountId)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether a 400 error is caused by the request itself (model unavailable,
+ * invalid params, etc.) rather than the account. These should NOT trigger
+ * account disabling or rotation — rotating to another account would just
+ * waste credits hitting the same error.
+ */
+function isNonAccountError(errMsg: string): boolean {
+  return (
+    errMsg.includes("model_not_supported")
+    || errMsg.includes("The requested model is not supported")
+    || errMsg.includes("invalid_request_body")
+    || errMsg.includes("invalid_request_error")
+    || errMsg.includes("invalid_reasoning_effort")
+    || errMsg.includes("reasoning_effort")
+    || errMsg.includes("tool_choice")
+  )
 }
 
 /**
@@ -456,24 +703,48 @@ async function handleMultiAccountHttpError(
       )
       return null
     }
+    case 408: {
+      // 408 Request Timeout: the upstream timed out reading our request body.
+      // This is a network/proxy issue (slow uplink, Clash hiccup), NOT an
+      // account problem. Don't mark the account, don't rotate.
+      consola.warn(
+        `Account ${account.label}: 408 request timeout (network issue, not rotating)`,
+      )
+      ;(
+        error as HTTPError & { __nonAccountError?: boolean }
+      ).__nonAccountError = true
+      return null
+    }
     default: {
-      // 5xx server errors are likely transient — retry once with same account before switching
+      // 5xx: upstream error — don't retry to avoid wasting request credits.
       if (error.response.status >= 500) {
-        consola.warn(
-          `Account ${account.label}: upstream ${error.response.status}, retrying in 2s...`,
+        accountManager.markAccountStatus(
+          account.id,
+          "error",
+          `HTTP ${error.response.status}`,
         )
-        await new Promise((r) => setTimeout(r, 2_000))
-        try {
-          const result = await doFetch(
-            retryContext.payload,
-            retryContext.tokenSource,
-          )
-          accountManager.markAccountSuccess(account.id)
-          return result
-        } catch {
-          consola.warn(
-            `Account ${account.label}: upstream ${error.response.status} persists, trying next account...`,
-          )
+        recordBreakerFailure(`HTTP ${error.response.status}`)
+        return null
+      }
+      // 400: check if it's a reasoning_effort value rejection first.
+      // If so, downgrade to "medium" and retry on the SAME account before
+      // falling through to account rotation.
+      if (error.response.status === 400) {
+        const downgraded = await tryDowngradeReasoningEffort(
+          error.message,
+          retryContext,
+          account.id,
+        )
+        if (downgraded !== null) return downgraded
+
+        // Non-account 400 errors (model not supported, invalid request body,
+        // tool_choice + thinking conflict, etc.) — these are NOT account
+        // problems. Return null WITHOUT marking the account as failed,
+        // and tag the error so the outer loop knows to stop rotating.
+        if (isNonAccountError(error.message)) {
+          ;(
+            error as HTTPError & { __nonAccountError?: boolean }
+          ).__nonAccountError = true
           return null
         }
       }
@@ -487,9 +758,83 @@ async function handleMultiAccountHttpError(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Circuit breaker for upstream/network failures.
+//
+// When the upstream (or our path to it via Clash) is broken, we used to keep
+// retrying every request, each one waiting ~5–30s before the inevitable
+// timeout — a self-inflicted DoS. Instead, after CB_THRESHOLD consecutive
+// network/5xx failures we OPEN the circuit: every new request fails fast
+// with a 503 for CB_OPEN_MS. After that window we go HALF-OPEN: the next
+// request is a probe; success closes the circuit, failure re-opens it.
+//
+// Tuning: 3 failures / 30s. Standard Hystrix-ish default. Real Clash
+// hiccups self-heal in 1–2 retries; 3 means it's actually broken.
+// ---------------------------------------------------------------------------
+const CB_THRESHOLD = 3
+const CB_OPEN_MS = 30_000
+
+const breaker = {
+  failures: 0,
+  openedAt: 0, // 0 = closed
+}
+
+function breakerOpenRemainingMs(): number {
+  if (breaker.openedAt === 0) return 0
+  const elapsed = Date.now() - breaker.openedAt
+  return elapsed >= CB_OPEN_MS ? 0 : CB_OPEN_MS - elapsed
+}
+
+function recordBreakerSuccess(): void {
+  if (breaker.failures !== 0 || breaker.openedAt !== 0) {
+    consola.info("Circuit breaker: closing (request succeeded)")
+  }
+  breaker.failures = 0
+  breaker.openedAt = 0
+}
+
+function recordBreakerFailure(reason: string): void {
+  breaker.failures += 1
+  if (breaker.failures >= CB_THRESHOLD && breaker.openedAt === 0) {
+    breaker.openedAt = Date.now()
+    consola.warn(
+      `Circuit breaker OPEN for ${CB_OPEN_MS / 1000}s after ${breaker.failures} consecutive failures (last: ${reason})`,
+    )
+  }
+}
+
+// eslint-disable-next-line max-lines-per-function, complexity
 async function createWithMultiAccount(payload: ChatCompletionsPayload) {
+  // Fast-fail if the breaker is open. Half-open: let one probe through.
+  const remaining = breakerOpenRemainingMs()
+  if (remaining > 0) {
+    const err = new HTTPError(
+      "Upstream temporarily unavailable",
+      new Response(
+        JSON.stringify({
+          error: {
+            type: "service_unavailable",
+            message: `Upstream (or proxy) is failing repeatedly. Circuit breaker open; will retry probe in ${Math.ceil(remaining / 1000)}s.`,
+          },
+        }),
+        {
+          status: 503,
+          statusText: "Service Unavailable",
+          headers: {
+            "content-type": "application/json",
+            "retry-after": String(Math.ceil(remaining / 1000)),
+          },
+        },
+      ),
+    )
+    throw err
+  }
+
   const triedAccountIds = new Set<string>()
   let lastError: unknown
+  // Per-call flag: allow ONE same-account retry after a network error.
+  // Reset connection pool first so we don't reuse a dead socket.
+  let networkRetried = false
 
   // Try up to 3 different accounts
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -502,7 +847,7 @@ async function createWithMultiAccount(payload: ChatCompletionsPayload) {
 
     if (!account.copilotToken) {
       // Token may be missing after restart — try to refresh before giving up
-      consola.info(
+      consola.debug(
         `Account ${account.label} has no copilot token, refreshing...`,
       )
       await accountManager.refreshAccountToken(account)
@@ -525,11 +870,54 @@ async function createWithMultiAccount(payload: ChatCompletionsPayload) {
       accountType: account.accountType,
       githubToken: account.githubToken,
       vsCodeVersion: state.vsCodeVersion,
+      machineId: account.machineId,
+      sessionId: account.sessionId,
+      proxy: account.proxy,
     }
 
     try {
-      const result = await doFetch(payload, tokenSource)
+      // --- Anti-correlation: frequency limiting ---
+      // Enforce minimum interval between requests on the same account
+      if (account.lastRequestAt) {
+        const elapsed = Date.now() - account.lastRequestAt
+        if (elapsed < MIN_SAME_ACCOUNT_INTERVAL_MS) {
+          await new Promise((r) =>
+            setTimeout(r, MIN_SAME_ACCOUNT_INTERVAL_MS - elapsed),
+          )
+        }
+      }
+
+      // --- Anti-correlation: inter-account jitter ---
+      // Add random delay when switching between accounts
+      if (lastUsedAccountId && lastUsedAccountId !== account.id) {
+        const jitter =
+          ACCOUNT_SWITCH_JITTER_MIN_MS
+          + Math.random()
+            * (ACCOUNT_SWITCH_JITTER_MAX_MS - ACCOUNT_SWITCH_JITTER_MIN_MS)
+        consola.debug(
+          `Account switch jitter: ${Math.round(jitter)}ms (${lastUsedAccountId.slice(0, 8)} → ${account.id.slice(0, 8)})`,
+        )
+        await new Promise((r) => setTimeout(r, jitter))
+      }
+      // eslint-disable-next-line require-atomic-updates
+      lastUsedAccountId = account.id
+
+      const result = await doFetch(payload, tokenSource, account.id)
+      account.lastRequestAt = Date.now()
       accountManager.markAccountSuccess(account.id)
+      recordBreakerSuccess()
+      // Tag streaming results with account info for keepalive targeting
+      if (Symbol.asyncIterator in result) {
+        ;(
+          result as AsyncGenerator & {
+            __accountInfo?: StreamAccountInfo
+          }
+        ).__accountInfo = {
+          accountId: account.id,
+          accountProxy: account.proxy,
+          apiBaseUrl: copilotBaseUrl(tokenSource),
+        }
+      }
       return result
     } catch (error) {
       lastError = error
@@ -540,13 +928,34 @@ async function createWithMultiAccount(payload: ChatCompletionsPayload) {
           tokenSource,
         })
         if (retryResult) return retryResult
+        // Non-account error — stop rotating, propagate to client.
+        if (
+          (error as HTTPError & { __nonAccountError?: boolean })
+            .__nonAccountError
+        ) {
+          throw error
+        }
       } else {
-        // Network error or other
-        accountManager.markAccountStatus(
-          account.id,
-          "error",
-          (error as Error).message,
+        // Network error (ECONNRESET, TLS disconnect, fetch failed, etc.):
+        // these are local/proxy/route problems, NOT account problems.
+        // Strategy: reset THIS account's connection pool (kill stale
+        // sockets) and retry the same account ONCE. If it fails again,
+        // throw — let the client (Claude Code) decide whether to retry.
+        const errMsg = (error as Error).message || String(error)
+        if (!networkRetried) {
+          networkRetried = true
+          consola.warn(
+            `Account ${account.label}: network error, resetting pool and retrying once: ${errMsg}`,
+          )
+          resetAccountConnections(account.id)
+          triedAccountIds.delete(account.id) // allow same account to be picked again
+          continue
+        }
+        consola.warn(
+          `Account ${account.label}: network error after retry (giving up): ${errMsg}`,
         )
+        recordBreakerFailure(`network: ${errMsg.slice(0, 80)}`)
+        throw error
       }
 
       consola.warn(
@@ -577,11 +986,12 @@ async function createWithMultiAccount(payload: ChatCompletionsPayload) {
 async function doFetch(
   payload: ChatCompletionsPayload,
   source: TokenSource,
+  accountId?: string,
 ): Promise<AsyncGenerator | ChatCompletionResponse> {
   const enableVision = payload.messages.some(
-    (x) =>
-      typeof x.content !== "string"
-      && x.content?.some((x) => x.type === "image_url"),
+    (msg) =>
+      typeof msg.content !== "string"
+      && msg.content?.some((part) => part.type === "image_url"),
   )
 
   const isAgentCall = payload.messages.some((msg) =>
@@ -608,17 +1018,32 @@ async function doFetch(
   const bodyString = JSON.stringify(body)
 
   // Fetch with timeout + exponential back-off retries
-  const response = await fetchWithRetry(url, () => ({
-    method: "POST",
-    headers: buildHeaders(),
-    body: bodyString,
-  }))
+  const response = await fetchWithRetry(
+    url,
+    () => ({
+      method: "POST",
+      headers: buildHeaders(),
+      body: bodyString,
+    }),
+    { accountId, accountProxy: source.proxy },
+  )
 
   if (!response.ok) {
     const errorBody = await response.text()
 
     if (response.status === 400) {
-      consola.warn(`400: ${errorBody}`)
+      // reasoning_effort / thinking 相关的 400 是预期内的(会被自动降级重试),
+      // 静默到 debug 避免误导用户。其他 400 保留 warn。
+      const isExpectedReasoningError =
+        errorBody.includes("reasoning_effort")
+        || errorBody.includes("invalid_reasoning_effort")
+        || errorBody.includes("does not support reasoning")
+      const isModelNotSupported = errorBody.includes("model_not_supported")
+      if (isExpectedReasoningError || isModelNotSupported) {
+        consola.debug(`400 (auto-handled): ${errorBody}`)
+      } else {
+        consola.warn(`400: ${errorBody}`)
+      }
     } else {
       consola.error("Failed to create chat completions", {
         status: response.status,
@@ -751,14 +1176,8 @@ export interface ChatCompletionsPayload {
     | null
   user?: string | null
 
-  // Anthropic thinking parameter — passed through transparently to Copilot
-  thinking?: {
-    type: "enabled"
-    budget_tokens?: number
-  }
-
   // OpenAI reasoning_effort parameter — triggers Copilot thinking mode
-  reasoning_effort?: "low" | "medium" | "high" | null
+  reasoning_effort?: "low" | "medium" | "high" | "max" | null
 
   // Copilot thinking budget — number of tokens allocated for thinking
   thinking_budget?: number | null

@@ -16,6 +16,7 @@ English | [简体中文](README.md)
 - [Usage Guide](#-usage-guide)
   - [GitHub Copilot Mode](#1-github-copilot-mode-default)
 - [Multi-Account Management](#-multi-account-management)
+- [Multi-Account Anti-Correlation](#️-multi-account-anti-correlation)
 - [Model Routing](#-model-routing)
 - [Proxy Configuration](#-proxy-configuration)
 - [Claude Code Integration](#-claude-code-integration)
@@ -46,10 +47,10 @@ English | [简体中文](README.md)
 | 👥 **Multi-Account** | Multiple GitHub accounts with automatic failover on quota exhaustion/rate limiting/bans |
 | 🔀 **Model Routing** | Flexible model name mapping and per-model concurrency control |
 | 📱 **Visual Management** | Web dashboard for account management, model config, and runtime stats |
-| 🛡️ **Network Resilience** | 120s connection timeout + exponential backoff retry (2s/5s/10s) |
+| 🛡️ **Network Resilience** | 120s timeout + instant stream recovery + proxy tunnel keepalive (30s heartbeat, per-account pools) |
 | ✂️ **Context Passthrough** | Full context passthrough to upstream API; clients (e.g. Claude Code) manage compression |
 | 🔍 **Smart Model Matching** | Handles model name format differences (date suffixes, dash/dot versions, etc.) |
-| 🧠 **Thinking Chain** | Automatically enables deep thinking (thinking/reasoning) for supported models, improving code quality |
+| 🧠 **Thinking Chain** | Automatically enables deep thinking for supported models, improving code quality |
 
 ---
 
@@ -215,6 +216,66 @@ The system automatically selects the best account in this priority order:
 ### Auto-Migration
 
 If you were using single-account mode before, your existing account is automatically migrated to the multi-account system on first startup with v1.1.0. No action required.
+
+---
+
+## 🛡️ Multi-Account Anti-Correlation
+
+New in v1.2.18. Anti-correlation measures are automatically enabled in multi-account mode to prevent GitHub from linking multiple accounts to the same user.
+
+### Automatic (No Configuration Needed)
+
+The following measures run **fully automatically** in multi-account mode — no user action required:
+
+| Measure | Description |
+|---------|-------------|
+| **Device Fingerprint Isolation** | Each account gets a unique `vscode-machineid` (persisted to accounts.json) and `vscode-sessionid` (regenerated on every startup) |
+| **Connection Pool Isolation** | Each account uses its own TCP/TLS connection pool — no shared connections |
+| **Request Timing Isolation** | 1-5s random delay when switching accounts; minimum 1s interval between same-account requests |
+| **Connection Pool Recycling** | Connection pools are automatically recreated every ~4 hours (±25% jitter), simulating client restarts |
+
+### Advanced: Per-Account Proxy (Optional)
+
+If you have multiple proxy endpoints, you can assign each account its own proxy for **exit IP isolation** — the strongest anti-correlation measure.
+
+> Most users only have one proxy and don't need this. The automatic measures above are sufficient.
+
+#### Configuration
+
+Edit `~/.local/share/copilot-api-plus/accounts.json` and add a `proxy` field to each account:
+
+```jsonc
+[
+  {
+    "id": "...",
+    "label": "Account 1",
+    "githubToken": "ghu_xxx",
+    "proxy": "http://127.0.0.1:7891"   // Exit via proxy A
+  },
+  {
+    "id": "...",
+    "label": "Account 2",
+    "githubToken": "ghu_yyy",
+    "proxy": "socks5://127.0.0.1:7892" // Exit via proxy B
+  },
+  {
+    "id": "...",
+    "label": "Account 3",
+    "githubToken": "ghu_zzz"
+    // No proxy = use global proxy or direct connection
+  }
+]
+```
+
+You can also specify the proxy when adding an account via API:
+
+```bash
+curl -X POST http://localhost:4141/admin/accounts \
+  -H "Content-Type: application/json" \
+  -d '{"githubToken": "ghu_xxx", "label": "Account 1", "proxy": "http://127.0.0.1:7891"}'
+```
+
+Supports `http://`, `https://`, and `socks5://` protocols. Restart the server after editing for changes to take effect.
 
 ---
 
@@ -580,11 +641,12 @@ Each API request outputs a log line with model name, status code, and duration:
 
 ### Network Resilience
 
-Built-in connection timeout and exponential backoff retry for upstream API requests:
+Built-in connection timeout and proxy tunnel keepalive for stable SSE streaming:
 
-- **Connection timeout**: 120 seconds (AbortController-based)
-- **Retry strategy**: Up to 3 retries (4 total attempts), exponential backoff: 2s → 5s → 10s
-- Only retries network-layer errors (timeout, TLS disconnect, connection reset, etc.); HTTP error codes (e.g. 400/500) are not retried
+- **Connection timeout**: 120 seconds for response headers (thinking models may take 60–120s before streaming starts)
+- **No network-layer retries**: Requests consume a Copilot credit upon reaching the server — retrying wastes credits. The caller (e.g. Claude Code) handles retry at the application level
+- **Instant stream recovery**: On SSE stream interruption, immediately destroys the connection pool so the next request uses fresh connections (recovery time drops from ~135s to seconds)
+- **Proxy tunnel keepalive**: Sends heartbeat requests every 30s through **each account's own connection pool** while SSE streams are active, preventing proxy nodes from killing CONNECT tunnels due to inactivity (each account is pinged independently in multi-account mode)
 - SSE stream interruptions gracefully send error events to the client
 
 ---

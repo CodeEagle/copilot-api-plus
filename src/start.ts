@@ -57,8 +57,9 @@ async function initMultiAccount(): Promise<void> {
 
       // Start background token/usage refresh
       await accountManager.startBackgroundRefresh()
-    } else if (state.githubToken) {
-      // No accounts in file — migrate current single account if we have a token
+    } else if (state.githubToken && !accountManager.accountsFileExisted) {
+      // accounts.json didn't exist at all — first run, migrate legacy single account.
+      // If the file existed but was empty, the user intentionally removed all accounts.
       try {
         const account = await accountManager.migrateFromLegacy(
           state.githubToken,
@@ -198,7 +199,7 @@ async function validateGitHubToken(token: string): Promise<void> {
  *   - manual: Require manual approval for requests
  *   - rateLimit: Seconds to wait between requests (optional)
  *   - rateLimitWait: Wait instead of erroring when rate limit is hit
- *   - githubToken: GitHub token to use (optional; if omitted a token setup prompt may run)
+ *   - githubToken: GitHub token to use (optional; if omitted, startup continues without interactive auth)
  *   - claudeCode: Generate a Claude Code environment launch command
  *   - showToken: Expose GitHub/Copilot tokens in responses for debugging
  *   - proxyEnv: Initialize proxy settings from environment variables
