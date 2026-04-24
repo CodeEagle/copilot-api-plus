@@ -2743,7 +2743,7 @@
             return;
           }
 
-          
+          const mode = getMode(state.data);
           const sections = [];
           sections.push(renderCopilotSection(state.data));
           sections.push(renderAdvancedPanel(state.data, mode));
